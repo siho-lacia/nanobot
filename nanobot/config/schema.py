@@ -198,21 +198,16 @@ class QQConfig(Base):
     )  # Allowed user openids (empty = public access)
 
 
-class MatrixConfig(Base):
-    """Matrix (Element) channel configuration."""
+class ZulipConfig(Base):
+    """Zulip channel configuration."""
 
     enabled: bool = False
-    homeserver: str = "https://matrix.org"
-    access_token: str = ""
-    user_id: str = ""  # e.g. @bot:matrix.org
-    device_id: str = ""
-    e2ee_enabled: bool = True  # end-to-end encryption support
-    sync_stop_grace_seconds: int = 2  # graceful sync_forever shutdown timeout
-    max_media_bytes: int = 20 * 1024 * 1024  # inbound + outbound attachment limit
-    allow_from: list[str] = Field(default_factory=list)
-    group_policy: Literal["open", "mention", "allowlist"] = "open"
-    group_allow_from: list[str] = Field(default_factory=list)
-    allow_room_mentions: bool = False
+    site: str = ""  # Zulip server URL, e.g. "https://your-org.zulipchat.com"
+    bot_email: str = ""  # Bot email address from Zulip bot settings
+    api_key: str = ""  # Bot API key from Zulip bot settings
+    allow_from: list[str] = Field(default_factory=list)  # Allowed user IDs or emails
+    group_policy: Literal["open", "mention", "allowlist"] = "open"  # Stream message handling
+    group_allow_from: list[str] = Field(default_factory=list)  # Allowed stream names
 
 
 class ChannelsConfig(Base):
@@ -230,6 +225,7 @@ class ChannelsConfig(Base):
     slack: SlackConfig = Field(default_factory=SlackConfig)
     qq: QQConfig = Field(default_factory=QQConfig)
     matrix: MatrixConfig = Field(default_factory=MatrixConfig)
+    zulip: ZulipConfig = Field(default_factory=ZulipConfig)
 
 
 class AgentDefaults(Base):

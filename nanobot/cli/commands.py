@@ -677,6 +677,11 @@ def channels_status():
     em_config = em.imap_host if em.imap_host else "[dim]not configured[/dim]"
     table.add_row("Email", "✓" if em.enabled else "✗", em_config)
 
+    # Zulip
+    zp = config.channels.zulip
+    zp_config = f"site: {zp.site[:20]}..." if zp.site else "[dim]not configured[/dim]"
+    table.add_row("Zulip", "✓" if zp.enabled else "✗", zp_config)
+
     console.print(table)
 
 
