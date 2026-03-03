@@ -63,7 +63,14 @@ def _zulip_to_markdown(content: str) -> str:
         content,
     )
 
-    return content
+    # Remove reply header lines like "@Sender Name:" that precede quotes
+    # These are added by Zulip when replying to messages
+    content = re.sub(r"^@[^:]+:\s*\n", "", content, flags=re.MULTILINE)
+
+    # Clean up empty blockquote lines
+    content = re.sub(r"> \s*$", "", content, flags=re.MULTILINE)
+
+    return content.strip()
 
 
 class ZulipChannel(BaseChannel):
