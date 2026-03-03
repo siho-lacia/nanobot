@@ -49,7 +49,7 @@ def _zulip_to_markdown(content: str) -> str:
     # Zulip uses #**stream/topic** for stream/topic links
     content = re.sub(r"#\*\*([^*]+)\*\*", r"#\1", content)
 
-    # Zulip quote format: [said](url): ```quote\n...\n```
+    # Zulip quote format: [said](url): ````quote\n...\n```
     # Convert to markdown blockquote format
     def convert_quote(match: re.Match) -> str:
         quoted_content = match.group(1)
@@ -58,7 +58,7 @@ def _zulip_to_markdown(content: str) -> str:
         return "\n".join(f"> {line}" for line in lines)
 
     content = re.sub(
-        r"\[said\]\([^)]+\):\s*```quote\n([\s\S]*?)\n```",
+        r"\[said\]\([^)]+\):\s*````quote\n([\s\S]*?)\n````",
         convert_quote,
         content,
     )
