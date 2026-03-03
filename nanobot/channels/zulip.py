@@ -49,9 +49,6 @@ def _zulip_to_markdown(content: str) -> str:
     # Zulip uses #**stream/topic** for stream/topic links
     content = re.sub(r"#\*\*([^*]+)\*\*", r"#\1", content)
 
-    # Zulip quote format: [said](url): ```quote
-...
-```
     # Note: Zulip uses variable backtick counts (n >= 3) to handle nested quotes.
     # We need to match the same number of opening and closing backticks.
     def parse_quotes(text: str) -> str:
