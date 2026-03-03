@@ -41,13 +41,27 @@ def _zulip_to_markdown(content: str) -> str:
         return ""
 
     # Zulip uses @**username** for user mentions, convert to @username
-    content = re.sub(r"@\*\*([^*]+)\*\*", r"@\1", content)
+    content = re.sub(r"@\*\*([^*|]+)(\|\d+)?\*\*", r"@\1", content)
 
-    # Zulip uses @**user|id** for user mentions with ID
-    content = re.sub(r"@\*\*[^|]+\|\d+\*\*", "@user", content)
+    # Zulip uses @_**user|id** for silent mentions (with underscore)
+    content = re.sub(r"@_\*\*[^|]+\|\d+\*\*", "@user", content)
 
     # Zulip uses #**stream/topic** for stream/topic links
     content = re.sub(r"#\*\*([^*]+)\*\*", r"#\1", content)
+
+    # Zulip quote format: [said](url): ```quote\n...\n```
+    # Convert to markdown blockquote format
+    def convert_quote(match: re.Match) -> str:
+        quoted_content = match.group(1)
+        # Convert each line to blockquote
+        lines = quoted_content.strip().split("\n")
+        return "\n".join(f"> {line}" for line in lines)
+
+    content = re.sub(
+        r"\[said\]\([^)]+\):\s*```quote\n([\s\S]*?)\n```",
+        convert_quote,
+        content,
+    )
 
     return content
 
