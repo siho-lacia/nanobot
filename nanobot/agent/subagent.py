@@ -2,6 +2,9 @@
 
 import asyncio
 import json
+import re
+import secrets
+import string
 import uuid
 from pathlib import Path
 from typing import Any
@@ -15,7 +18,142 @@ from nanobot.agent.tools.web import WebFetchTool, WebSearchTool
 from nanobot.bus.events import InboundMessage
 from nanobot.bus.queue import MessageBus
 from nanobot.config.schema import ExecToolConfig
-from nanobot.providers.base import LLMProvider
+from nanobot.providers.base import LLMProvider, ToolCallRequest
+
+_ALNUM = string.ascii_letters + string.digits
+
+
+def _short_tool_id() -> str:
+    """Generate a short alphanumeric tool call ID."""
+    return "".join(secrets.choice(_ALNUM) for _ in range(9))
+
+
+def _parse_text_tool_calls(content: str | None) -> list[ToolCallRequest]:
+    """Extract tool calls from text content when LLM outputs them as JSON.
+
+    Some models output tool calls as text JSON like:
+    {"name": "exec", "arguments": {"command": "..."}}
+
+    Or appended to text:
+    I'll do something:{"name": "exec", "arguments": {...}}
+
+    This parses those and returns them as ToolCallRequest objects.
+    """
+    if not content:
+        return []
+
+    tool_calls = []
+
+    # Pattern: JSON object that starts with {"name": "..." and contains "arguments"
+    # We need to find complete JSON objects and parse them
+    # Use a regex to find potential JSON tool call objects
+    json_pattern = re.compile(r'\{\s*"name"\s*:\s*"([^"]+)"\s*,\s*"arguments"\s*:\s*')
+
+    for match in json_pattern.finditer(content):
+        start = match.start()
+        tool_name = match.group(1)
+
+        # Find the complete JSON object by counting braces
+        brace_start = start
+        brace_count = 0
+        in_string = False
+        escape_next = False
+
+        for i in range(start, len(content)):
+            char = content[i]
+
+            if escape_next:
+                escape_next = False
+                continue
+
+            if char == "\\":
+                escape_next = True
+                continue
+
+            if char == '"' and not escape_next:
+                in_string = not in_string
+                continue
+
+            if not in_string:
+                if char == "{":
+                    brace_count += 1
+                elif char == "}":
+                    brace_count -= 1
+                    if brace_count == 0:
+                        # Found complete JSON object
+                        json_str = content[start : i + 1]
+                        try:
+                            obj = json.loads(json_str)
+                            if isinstance(obj, dict) and "name" in obj and "arguments" in obj:
+                                args = obj["arguments"]
+                                if isinstance(args, dict):
+                                    tool_calls.append(
+                                        ToolCallRequest(
+                                            id=_short_tool_id(),
+                                            name=tool_name,
+                                            arguments=args,
+                                        )
+                                    )
+                        except (json.JSONDecodeError, TypeError, KeyError, AttributeError):
+                            pass
+                        break
+
+    return tool_calls
+
+
+def _remove_text_tool_calls(content: str | None) -> str:
+    """Remove text-based tool call JSON from content.
+
+    After parsing and executing text tool calls, we want to remove them
+    from the response content to avoid confusing the user.
+    """
+    if not content:
+        return ""
+
+    # Find and remove JSON tool call objects
+    # Use the same brace-counting approach as parsing
+    json_pattern = re.compile(r'\{\s*"name"\s*:\s*"([^"]+)"\s*,\s*"arguments"\s*:\s*')
+
+    result = content
+    offsets = []  # (start, end) positions to remove
+
+    for match in json_pattern.finditer(result):
+        start = match.start()
+
+        # Find the complete JSON object by counting braces
+        brace_count = 0
+        in_string = False
+        escape_next = False
+
+        for i in range(start, len(result)):
+            char = result[i]
+
+            if escape_next:
+                escape_next = False
+                continue
+
+            if char == "\\":
+                escape_next = True
+                continue
+
+            if char == '"' and not escape_next:
+                in_string = not in_string
+                continue
+
+            if not in_string:
+                if char == "{":
+                    brace_count += 1
+                elif char == "}":
+                    brace_count -= 1
+                    if brace_count == 0:
+                        offsets.append((start, i + 1))
+                        break
+
+    # Remove from end to start to preserve offsets
+    for start, end in reversed(offsets):
+        result = result[:start] + result[end:]
+
+    return result.strip()
 
 
 class SubagentManager:
@@ -36,6 +174,7 @@ class SubagentManager:
         restrict_to_workspace: bool = False,
     ):
         from nanobot.config.schema import ExecToolConfig
+
         self.provider = provider
         self.workspace = workspace
         self.bus = bus
@@ -63,9 +202,7 @@ class SubagentManager:
         display_label = label or task[:30] + ("..." if len(task) > 30 else "")
         origin = {"channel": origin_channel, "chat_id": origin_chat_id}
 
-        bg_task = asyncio.create_task(
-            self._run_subagent(task_id, task, display_label, origin)
-        )
+        bg_task = asyncio.create_task(self._run_subagent(task_id, task, display_label, origin))
         self._running_tasks[task_id] = bg_task
         if session_key:
             self._session_tasks.setdefault(session_key, set()).add(task_id)
@@ -100,15 +237,17 @@ class SubagentManager:
             tools.register(WriteFileTool(workspace=self.workspace, allowed_dir=allowed_dir))
             tools.register(EditFileTool(workspace=self.workspace, allowed_dir=allowed_dir))
             tools.register(ListDirTool(workspace=self.workspace, allowed_dir=allowed_dir))
-            tools.register(ExecTool(
-                working_dir=str(self.workspace),
-                timeout=self.exec_config.timeout,
-                restrict_to_workspace=self.restrict_to_workspace,
-                path_append=self.exec_config.path_append,
-            ))
+            tools.register(
+                ExecTool(
+                    working_dir=str(self.workspace),
+                    timeout=self.exec_config.timeout,
+                    restrict_to_workspace=self.restrict_to_workspace,
+                    path_append=self.exec_config.path_append,
+                )
+            )
             tools.register(WebSearchTool(api_key=self.brave_api_key, proxy=self.web_proxy))
             tools.register(WebFetchTool(proxy=self.web_proxy))
-            
+
             system_prompt = self._build_subagent_prompt()
             messages: list[dict[str, Any]] = [
                 {"role": "system", "content": system_prompt},
@@ -145,24 +284,85 @@ class SubagentManager:
                         }
                         for tc in response.tool_calls
                     ]
-                    messages.append({
-                        "role": "assistant",
-                        "content": response.content or "",
-                        "tool_calls": tool_call_dicts,
-                    })
+                    messages.append(
+                        {
+                            "role": "assistant",
+                            "content": response.content or "",
+                            "tool_calls": tool_call_dicts,
+                        }
+                    )
 
                     # Execute tools
                     for tool_call in response.tool_calls:
                         args_str = json.dumps(tool_call.arguments, ensure_ascii=False)
-                        logger.debug("Subagent [{}] executing: {} with arguments: {}", task_id, tool_call.name, args_str)
+                        logger.debug(
+                            "Subagent [{}] executing: {} with arguments: {}",
+                            task_id,
+                            tool_call.name,
+                            args_str,
+                        )
                         result = await tools.execute(tool_call.name, tool_call.arguments)
-                        messages.append({
-                            "role": "tool",
-                            "tool_call_id": tool_call.id,
-                            "name": tool_call.name,
-                            "content": result,
-                        })
+                        messages.append(
+                            {
+                                "role": "tool",
+                                "tool_call_id": tool_call.id,
+                                "name": tool_call.name,
+                                "content": result,
+                            }
+                        )
                 else:
+                    # Try to parse text-based tool calls as fallback
+                    # Some models output tool calls as JSON text instead of structured calls
+                    text_tool_calls = _parse_text_tool_calls(response.content)
+
+                    if text_tool_calls:
+                        # Found text-based tool calls - treat them like structured calls
+                        logger.info(
+                            "Subagent [{}] parsed {} text-based tool calls",
+                            task_id,
+                            len(text_tool_calls),
+                        )
+                        tool_call_dicts = [
+                            {
+                                "id": tc.id,
+                                "type": "function",
+                                "function": {
+                                    "name": tc.name,
+                                    "arguments": json.dumps(tc.arguments, ensure_ascii=False),
+                                },
+                            }
+                            for tc in text_tool_calls
+                        ]
+                        # Remove the JSON tool calls from content before adding to history
+                        filtered_content = _remove_text_tool_calls(response.content)
+                        messages.append(
+                            {
+                                "role": "assistant",
+                                "content": filtered_content if filtered_content.strip() else None,
+                                "tool_calls": tool_call_dicts,
+                            }
+                        )
+
+                        for tool_call in text_tool_calls:
+                            args_str = json.dumps(tool_call.arguments, ensure_ascii=False)
+                            logger.debug(
+                                "Subagent [{}] executing: {} with arguments: {}",
+                                task_id,
+                                tool_call.name,
+                                args_str,
+                            )
+                            result = await tools.execute(tool_call.name, tool_call.arguments)
+                            messages.append(
+                                {
+                                    "role": "tool",
+                                    "tool_call_id": tool_call.id,
+                                    "name": tool_call.name,
+                                    "content": result,
+                                }
+                            )
+                        # Continue the loop to process more tool calls
+                        continue
+
                     final_result = response.content
                     break
 
@@ -207,15 +407,18 @@ Summarize this naturally for the user. Keep it brief (1-2 sentences). Do not men
         )
 
         await self.bus.publish_inbound(msg)
-        logger.debug("Subagent [{}] announced result to {}:{}", task_id, origin['channel'], origin['chat_id'])
-    
+        logger.debug(
+            "Subagent [{}] announced result to {}:{}", task_id, origin["channel"], origin["chat_id"]
+        )
+
     def _build_subagent_prompt(self) -> str:
         """Build a focused system prompt for the subagent."""
         from nanobot.agent.context import ContextBuilder
         from nanobot.agent.skills import SkillsLoader
 
         time_ctx = ContextBuilder._build_runtime_context(None, None)
-        parts = [f"""# Subagent
+        parts = [
+            f"""# Subagent
 
 {time_ctx}
 
@@ -223,18 +426,24 @@ You are a subagent spawned by the main agent to complete a specific task.
 Stay focused on the assigned task. Your final response will be reported back to the main agent.
 
 ## Workspace
-{self.workspace}"""]
+{self.workspace}"""
+        ]
 
         skills_summary = SkillsLoader(self.workspace).build_skills_summary()
         if skills_summary:
-            parts.append(f"## Skills\n\nRead SKILL.md with read_file to use a skill.\n\n{skills_summary}")
+            parts.append(
+                f"## Skills\n\nRead SKILL.md with read_file to use a skill.\n\n{skills_summary}"
+            )
 
         return "\n\n".join(parts)
-    
+
     async def cancel_by_session(self, session_key: str) -> int:
         """Cancel all subagents for the given session. Returns count cancelled."""
-        tasks = [self._running_tasks[tid] for tid in self._session_tasks.get(session_key, [])
-                 if tid in self._running_tasks and not self._running_tasks[tid].done()]
+        tasks = [
+            self._running_tasks[tid]
+            for tid in self._session_tasks.get(session_key, [])
+            if tid in self._running_tasks and not self._running_tasks[tid].done()
+        ]
         for t in tasks:
             t.cancel()
         if tasks:
