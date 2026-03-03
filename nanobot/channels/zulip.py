@@ -49,19 +49,36 @@ def _zulip_to_markdown(content: str) -> str:
     # Zulip uses #**stream/topic** for stream/topic links
     content = re.sub(r"#\*\*([^*]+)\*\*", r"#\1", content)
 
-    # Zulip quote format: [said](url): ````quote\n...\n```
-    # Convert to markdown blockquote format
-    def convert_quote(match: re.Match) -> str:
-        quoted_content = match.group(1)
-        # Convert each line to blockquote
-        lines = quoted_content.strip().split("\n")
-        return "\n".join(f"> {line}" for line in lines)
+    # Zulip quote format: [said](url): ```quote
+...
+```
+    # Note: Zulip uses variable backtick counts (n >= 3) to handle nested quotes.
+    # We need to match the same number of opening and closing backticks.
+    def parse_quotes(text: str) -> str:
+        """Parse Zulip quotes with variable backtick counts."""
+        result = []
+        i = 0
+        while i < len(text):
+            # Look for [said](url): pattern followed by backticks
+            quote_start = re.match(r"\[said\]\([^)]+\):\s*(`+)quote\n", text[i:])
+            if quote_start:
+                backticks = quote_start.group(1)
+                num_backticks = len(backticks)
+                start_pos = i + quote_start.end()
+                # Find matching closing backticks
+                close_pattern = f"\n{backticks}"
+                close_pos = text.find(close_pattern, start_pos)
+                if close_pos != -1:
+                    quoted_content = text[start_pos:close_pos]
+                    lines = quoted_content.strip().split("\n")
+                    result.append("\n".join(f"> {line}" for line in lines))
+                    i = close_pos + len(close_pattern)
+                    continue
+            result.append(text[i])
+            i += 1
+        return "".join(result)
 
-    content = re.sub(
-        r"\[said\]\([^)]+\):\s*````quote\n([\s\S]*?)\n````",
-        convert_quote,
-        content,
-    )
+    content = parse_quotes(content)
 
     # Remove reply header lines like "@Sender Name:" that precede quotes
     # These are added by Zulip when replying to messages
